@@ -486,6 +486,7 @@ class Player {
         this.slowShotTimeoutId = null;
         this.rapidFireTimeoutId = null;
         this.missileChargeIntervalId = null;
+        this.isDefeated = false;
     } 
 
     // Los métodos van AFUERA del constructor, al mismo nivel
@@ -1548,6 +1549,8 @@ function damagePlayer(player, amount = 1) {
         player.health--; 
         playSound(audioAssets.playerDamaged);
         triggerDamageVignette();
+        player.enemiesSinceDamage = 0;
+        player.currentComboTier = 0;
         if (player.magnetStacks > 0) player.magnetStacks--;
         if (player.burstFireLevel > 0) player.burstFireLevel--; 
         if (player.wingCannonsLevel > 0) player.wingCannonsLevel--; 
@@ -1569,6 +1572,7 @@ function handlePlayerDeath(player) {
 
     player.lives--;
     player.enemiesSinceDamage = 0;
+    player.currentComboTier = 0;
     playSound(audioAssets.explosionLarge);
     explosions.push(new Explosion(player.x + player.width / 2, player.y + player.height / 2, player.width));
     player.magnetStacks = 0;
@@ -1589,22 +1593,18 @@ function handlePlayerDeath(player) {
 
     if (player.lives <= 0) {
         
-        // El jugador ha sido derrotado permanentemente. Lo removemos del juego.
+        player.isDefeated = true; // Marcamos al jugador como derrotado
+        
+        // Guardamos sus estadísticas finales
         finalGameStats.score += player.score;
         finalGameStats.kills += player.enemyDestroyedCount;
         finalGameStats.bosses += player.bossesDestroyed;
 
-        const playerIndex = players.indexOf(player);
-        if (playerIndex > -1) {
-            players.splice(playerIndex, 1);
-        }
-
-        // Ahora, comprobamos si NO quedan más jugadores en la partida.
-        if (players.length === 0) {
+        // Comprobamos si TODOS los jugadores están derrotados para terminar el juego
+        if (players.every(p => p.isDefeated)) {
             gameState = 'GAME_OVER_DELAY';
             gameOverDelayStartTime = Date.now();
         }
-        // Si todavía quedan jugadores, la partida continúa para ellos.
         
     } else {
         // El jugador tiene vidas restantes y reaparece.
@@ -1813,8 +1813,15 @@ laser.collidedEnemies.add(target);
         }
     }
     function handleTargetDestroyed(target) {
-    // Definimos al Jugador 1 como el receptor de todos los puntos y estadísticas.
-    const scoringPlayer = players[0];
+    // Lógica para encontrar qué jugador debe recibir los puntos.
+    // Prioriza al jugador que no esté derrotado.
+    let scoringPlayer = players.find(p => !p.isDefeated);
+
+    // Si no se encuentra un jugador activo (ambos murieron a la vez),
+    // se le asigna al jugador 1 por defecto para evitar errores.
+    if (!scoringPlayer) {
+        scoringPlayer = players[0];
+    }
     if (!scoringPlayer) return; // Si no hay jugador, no hacemos nada.
 
     if (target instanceof Boss) {
@@ -1963,14 +1970,13 @@ laser.collidedEnemies.add(target);
 }
     function checkEnemyProjectilesVsPlayer() {
     players.forEach(player => {
-        if (!player || player.isInvulnerable) return;
+        if (!player || player.isInvulnerable || player.isDefeated) return;
 
         for (let bIndex = enemyBullets.length - 1; bIndex >= 0; bIndex--) {
             const bullet = enemyBullets[bIndex];
             if (checkCircularCollision(bullet, player)) {
                 enemyBullets.splice(bIndex, 1);
                 smallExplosions.push(new SmallExplosion(bullet.x + bullet.width / 2, bullet.y + bullet.height / 2));
-                player.enemiesSinceDamage = 0; 
                 damagePlayer(player, 1);       
                 return; // Sale del bucle para este jugador
             }
@@ -1980,7 +1986,7 @@ laser.collidedEnemies.add(target);
 
 function checkPlayerVsPowerUps() {
     players.forEach(player => {
-        if (!player) return;
+        if (!player || player.isDefeated) return;
         for (let pIndex = powerUps.length - 1; pIndex >= 0; pIndex--) {
             const powerUp = powerUps[pIndex];
             if (checkCircularCollision(player, powerUp)) {
@@ -2042,6 +2048,25 @@ function applyPowerUp(player, type) {
             player.magnetStacks = Math.min(5, player.magnetStacks + 1);
             break;
         case 'health':
+            if (isTwoPlayerMode) {
+                // Buscamos al otro jugador
+                const otherPlayer = (player === players[0]) ? players[1] : players[0];
+                // Si el otro jugador existe y está derrotado, lo revivimos
+                if (otherPlayer && otherPlayer.isDefeated) {
+                    playSound(audioAssets.powerupExtraLife);
+                    otherPlayer.lives = 1;
+                    otherPlayer.health = Math.floor(DIFFICULTY_SETTINGS[difficultyLevel].initialHealth / 2) || 1; // Le damos la mitad de la vida inicial (o 1)
+                    otherPlayer.isDefeated = false;
+                    
+                    // Lo reposicionamos y le damos invulnerabilidad
+                    otherPlayer.x = canvas.width / 2 - otherPlayer.width / 2;
+                    otherPlayer.y = canvas.height - 150 * scaleFactor;
+                    otherPlayer.isInvulnerable = true;
+                    setTimeout(() => { otherPlayer.isInvulnerable = false; }, GAME_CONFIG.player.invulnerabilityDuration);
+                    
+                    return; // Importante: Salimos para no darle la vida al jugador que la recogió
+                }
+            }
             playSound(audioAssets.powerupShield);
             player.health = Math.min(diff.maxHealth, player.health + 1);
             break;
@@ -2056,6 +2081,22 @@ function applyPowerUp(player, type) {
             }
             break;
         case 'extraLife':
+            if (isTwoPlayerMode) {
+                const otherPlayer = (player === players[0]) ? players[1] : players[0];
+                if (otherPlayer && otherPlayer.isDefeated) {
+                    playSound(audioAssets.powerupExtraLife);
+                    otherPlayer.lives = 1;
+                    otherPlayer.health = DIFFICULTY_SETTINGS[difficultyLevel].initialHealth; // Con una vida extra, le damos toda la salud
+                    otherPlayer.isDefeated = false;
+
+                    otherPlayer.x = canvas.width / 2 - otherPlayer.width / 2;
+                    otherPlayer.y = canvas.height - 150 * scaleFactor;
+                    otherPlayer.isInvulnerable = true;
+                    setTimeout(() => { otherPlayer.isInvulnerable = false; }, GAME_CONFIG.player.invulnerabilityDuration);
+
+                    return; // Salimos
+                }
+            }
             playSound(audioAssets.powerupExtraLife);
             if (player.lives < diff.maxLives) { 
                 player.lives++; 
@@ -2274,11 +2315,7 @@ function applyPowerUp(player, type) {
          if (!nextBgFar && !nextBgMid && !nextBgNear) {
             isTransitioningBackground = false;
             console.log("Transición de fondo completada. Preparando la siguiente.");
-            // --- INICIO DEL CÓDIGO MODIFICADO ---
-            // En cuanto una transición termina, llamamos a la función
-            // de nuevo para que prepare el siguiente fondo en la secuencia.
-            updateCurrentBackgrounds(); 
-            // --- FIN DEL CÓDIGO MODIFICADO ---
+            updateCurrentBackgrounds();
         }
     
     
@@ -2327,14 +2364,14 @@ function applyPowerUp(player, type) {
     handleAsteroidSeparation(); 
      if (gameRunning && !isPaused) {
         if (isTwoPlayerMode) {
-            if (keys['g'] && players[0]) players[0].shoot();       // P1: Disparo con G
-            if (keys['1'] && players[1]) players[1].shoot();       // P2: Disparo con Numpad 1 (la tecla es '1' para el Numpad)
+            if (keys['g'] && players[0] && !players[0].isDefeated) players[0].shoot();       // P1: Disparo con G
+            if (keys['1'] && players[1] && !players[1].isDefeated) players[1].shoot();       // P2: Disparo con Numpad 1 (la tecla es '1' para el Numpad)
         } else {
             if (keys[' '] && players[0]) players[0].shoot(); // 1P: Disparo con Espacio (sin cambios)
         }
     }
     stars.forEach(s => s.update(playerSpeedX, playerSpeedY));
-    players.forEach(p => p.update());
+    players.forEach(p =>{if (!p.isDefeated) p.update();});
     for (let i = bullets.length - 1; i >= 0; i--) {
         const b = bullets[i];
         b.update();
@@ -2404,10 +2441,12 @@ function applyPowerUp(player, type) {
     powerUps.forEach(p => p.draw()); 
     homingPowerUps.forEach(hp => hp.draw());
     players.forEach(p => {
-        p.draw();
-        p.shieldVisuals.forEach(sv => sv.draw(ctx));
-        p.drones.forEach(d => d.draw());
-    });
+        if (!p.isDefeated) {
+            p.draw();
+            p.shieldVisuals.forEach(sv => sv.draw(ctx));
+            p.drones.forEach(d => d.draw());
+        }
+        });
     explosions.forEach(ex => ex.draw()); 
     smallExplosions.forEach(ex => ex.draw()); 
     impactExplosions.forEach(imp => imp.draw());
@@ -2598,7 +2637,7 @@ if (gameState === 'INTERMISSION' && intermissionData) {
                 }
             });
         }
-        if (!player || player.isInvulnerable) return;
+         if (!player || player.isInvulnerable || player.isDefeated) return;
         const hazards = [...asteroids, ...bosses, ...enemies.filter(e => e.type === 8), ...asteroidShots];
         for (let i = hazards.length - 1; i >= 0; i--) {
             const hazard = hazards[i];
@@ -2607,7 +2646,7 @@ if (gameState === 'INTERMISSION' && intermissionData) {
             if (hazard instanceof Boss && !hazard.isVulnerable) continue;
             
             if (checkCircularCollision(player, hazard)) {
-                player.enemiesSinceDamage = 0; 
+                 
                 // ... (lógica de god mode si la tienes)
                 
                 if (hazard instanceof Asteroid) {
@@ -2661,16 +2700,19 @@ if (gameState === 'INTERMISSION' && intermissionData) {
         mobilePauseBtn.remove();
     }
 
-    // --- LÓGICA DE PUNTUACIÓN CORREGIDA ---
+    // --- LÓGICA DE PUNTUACIÓN 
     // Calcula el puntaje y las estadísticas totales sumando las de todos los jugadores.
-    const totalScore = finalGameStats.score;
-    const totalKills = finalGameStats.kills;
-    const totalBosses = finalGameStats.bosses;
+    let totalScore = finalGameStats.score;   
+    let totalKills = finalGameStats.kills;   
+    let totalBosses = finalGameStats.bosses;
 
     players.forEach(p => {
-        totalScore += p.score;
-        totalKills += p.enemyDestroyedCount;
-        totalBosses += p.bossesDestroyed;
+        // Solo sumamos si el jugador no fue derrotado, para no contar dos veces.
+        if (!p.isDefeated) {
+             totalScore += p.score;
+             totalKills += p.enemyDestroyedCount;
+             totalBosses += p.bossesDestroyed;
+        }
     });
     
     if (!scoreAndStatsDisabled) { 
